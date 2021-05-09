@@ -34,7 +34,7 @@
       ;; else
       zloc)))
 
-(defn rewrite-if
+(defn prune-conditionals
   "Given `code` as a string, remove if, when, if-not and when-not conditionals
   based on the test conditions.
 
@@ -48,8 +48,8 @@
   code, in particular for removing code has become dead due to feature flags
   being changed. Example:
 
-     (rewrite-if \"(if (flag-one?) :a :b)\"
-                 {'(flag-one?) true})
+     (prune-conditionals \"(if (flag-one?) :a :b)\"
+                         {'(flag-one?) true})
 
   In this example the transformation code will behave as if all instances of
   '(flag-one?) have been replaced by `true`.
@@ -64,7 +64,7 @@
   - :refer-clojure :exclude [if when] and similar configurations could lead to
     unwanted results"
   ([code]
-   (rewrite-if code {}))
+   (prune-conditionals code {}))
   ([code test-lookup]
    (let [zip (z/of-string code)]
      (loop [zloc zip]
@@ -86,11 +86,11 @@
   (when-not (.exists (io/file f))
     (println "File does not exist" f)
     (System/exit 1))
-  (let [updated (str (rewrite-if (slurp f) mapping))]
+  (let [updated (str (prune-conditionals (slurp f) mapping))]
     (spit f updated)))
 
 (comment
- (rewrite-if "(defn foo [] (if (some-test) :a :b)))"
-             {'(some-test) true})
+ (prune-conditionals "(defn foo [] (if (some-test) :a :b)))"
+                     {'(some-test) true})
 
  )

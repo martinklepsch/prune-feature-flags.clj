@@ -10,7 +10,9 @@ This is a little babashka utility script to remove conditionals based on static 
 
 With no `test-lookup` supplied this will transform code in the following way:
 
-    (prune-conditionals "(if true :a :b)")
+```clj
+(prune-conditionals "(if true :a :b)")
+```
 
 the entire `if` form will get replaced by just `:a` since the else branch is
 effectively dead.
@@ -19,8 +21,10 @@ When supplying a `test-lookup` map this becomes more useful with real world
 code, in particular for removing code has become dead due to feature flags
 being changed. Example:
 
-    (prune-conditionals "(if (flag-one?) :a :b)"
-                        {'(flag-one?) true})
+```clj
+(prune-conditionals "(if (flag-one?) :a :b)"
+                    {'(flag-one?) true})
+```
 
 In this example the transformation code will behave as if all instances of
 '(flag-one?) have been replaced by `true`.

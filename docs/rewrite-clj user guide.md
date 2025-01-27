@@ -1,0 +1,1140 @@
+### Terminology
+
+Rewrite-clj has an `sexpr` function that returns Clojure forms.
+Our usage of the terms "s-expression" and "forms" might be less nuanced than some formal definitions.
+I think we are in line with [Clojure for the Brave and True’s description of forms](https://www.braveclojure.com/do-things/#Forms).
+To us, a Clojure form is any parsed (but not evaluated) Clojure as it would be returned by the Clojure reader.
+
+### Rewrite-clj Nodes
+
+Rewrite-clj parses Clojure source into rewrite-clj nodes.
+
+While reviewing the following example, it helps to remember that Clojure source is data.
+
+![introduction parsed nodes](introduction-parsed-nodes.png)
+
+Each node carries the positional metadata `:row`, `:col`, `:end-row` and `:end-col`.
+The positional data is 1-based and `:end-col` is exclusive.
+
+You can [parse](#parser-api) and work with [nodes](#node-api) directly or take advantage of the power of the [zip API](#zip-api).
+
+Rewrite-clj offers easy conversion from rewrite-clj nodes to Clojure forms and back.
+This is convenient but does come with some caveats.
+As you get more experienced with rewrite-clj, you will want to review [sexpr nuances](#sexpr-nuances).
+
+## Project Setup
+
+Rewrite-clj is available in babashka by default.
+
+## Rewrite-clj APIs
+There are 4 public API namespaces:
+
+1. `rewrite-clj.zip`
+2. `rewrite-clj.parser`
+3. `rewrite-clj.node`
+4. `rewrite-clj.paredit`
+
+### Zip API
+Traverse and modify Clojure/ClojureScript/EDN.
+This is considered the main rewrite-clj API and might very well be all you need.
+
+You’ll optionally use the [node API](#node-api) on the rewrite-clj nodes in the zipper.
+
+#### A Brief Introduction to Zippers
+
+<dl><dt><strong>💡 TIP</strong></dt><dd>
+
+Rewrite-clj uses a customized version of
+[Clojure’s clojure.zip](https://clojure.github.io/clojure/clojure.zip-api.html).
+If you are not familiar with zippers, you may find the following resources helpful:
+
+* [Clojure overview of zippers](https://clojure.org/reference/other_libraries#_zippers_functional_tree_editing_clojure_zip)
+* [Arne Brasseur - The Art of Tree Shaping with Clojure Zippers](https://lambdaisland.com/blog/2018-11-26-art-tree-shaping-clojure-zip)
+* [Tim Baldrige - PivotShare - Series of 7 Videos on Clojure Zippers](https://tbaldridge.pivotshare.com/media/zippers-episode-1/11348/feature?t=0)
+</dd></dl>
+
+At a conceptual level, the rewrite-clj zipper holds:
+
+* a tree of rewrite-clj nodes representing your parsed Clojure source
+* your current location within the zipper
+
+Because the zipper holds both the tree and your location within the tree, its variable is commonly named `zloc`.
+The zipper is immutable, as such, location changes and node modifications are always returned in a new zipper.
+
+You may want to refer to [rewrite-clj nodes](#nodes) while reviewing this introductory example:
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+;; define some test data
+(def data-string
+"(defn my-function [a]
+  ;; a comment
+  (* a 3))")
+
+;; parse code to nodes, create a zipper, and navigate to the first non-whitespace node
+(def zloc (z/of-string data-string))
+
+;; explore what we've parsed
+(z/sexpr zloc)
+;; => (defn my-function [a] (* a 3))
+(-> zloc z/down z/right z/node pr)
+;; =stdout=>
+; <token: my-function>
+(-> zloc z/down z/right z/sexpr)
+;; => my-function
+
+;; rename my-function to my-function2 and return resulting s-expression
+(-> zloc
+    z/down
+    z/right
+    (z/edit (comp symbol str) "2")
+    z/up
+    z/sexpr)
+;; => (defn my-function2 [a] (* a 3))
+
+;; rename my-function to my-function2 and return updated string from root node
+(-> zloc
+    z/down
+    z/right
+    (z/edit (comp symbol str) "2")
+    z/root-string
+    println)
+;; =stdout=>
+; (defn my-function2 [a]
+;   ;; a comment
+;   (* a 3))
+
+```
+
+<dl><dt><strong>💡 TIP</strong></dt><dd>
+
+The zip location movement functions (`right`, `left`, `up`, `down`, etc) skip over Clojure whitespace nodes and comment nodes.
+Remember that Clojure whitespace includes commas.
+If you want to navigate over all nodes, use the `**` counterparts (`right**`, `left*`, `up*`, `down*`, etc).
+
+Similarily, the zipper creation functions `of-node`, `of-string` and `of-file` automatically skip over the the first Clojure whitespace and comment nodes.
+This is usually appropriate, but if you don’t want this auto-navigation on create use the `**` counterparts `of-node**`, `of-string*`, and `of-file*`.
+</dd></dl>
+
+See [zip API docs](https://cljdoc.org/d/rewrite-clj/rewrite-clj/CURRENT/api/rewrite-clj.zip).
+
+#### Finding Elements with the Zip API
+
+The `rewrite-clj.zip` namespace includes find operations to navigate to locations of interest in your zipper.
+Let’s assume you want to modify the following minimal `project.clj` by replacing the `:description` placeholder text with something more meaningful:
+
+**project.clj snippet**
+
+```clojure
+(defproject my-project "0.1.0-SNAPSHOT"
+  :description "Enter description")
+```
+
+Most find functions accept an optional location movement function.
+Use:
+
+* `rewrite-clj.zip/right` (the default) - to search sibling nodes to the right
+* `rewrite-clj.zip/left` to search siblings to left
+* `rewrite-clj.zip/next` for a depth-first tree search
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+;; for sake of a runnable example we'll load from a string:
+(def zloc (z/of-string
+"(defproject my-project \"0.1.0-SNAPSHOT\"
+  :description \"Enter description\")"))
+
+;; loading from a file, looks like so:
+;; (def zloc (z/of-file "project.clj")) ;; ①
+
+;; find defproject by navigating depth-first
+(def zloc-defproject (z/find-value zloc z/next 'defproject))
+;; verify that we are where we think we are
+(z/sexpr zloc-defproject)
+;; => defproject
+
+;; search right for :description and then move one node to the right ;; ②
+(def zloc-desc (-> zloc-defproject (z/find-value :description) z/right))
+;; check that this worked
+(z/sexpr zloc-desc)
+;; => "Enter description"
+
+;; replace node at current location and return the result
+(-> zloc-desc (z/replace "My first Project.") z/root-string println)
+;; =stdout=>
+; (defproject my-project "0.1.0-SNAPSHOT"
+;   :description "My first Project.")
+```
+1. reading from a file is only available from Clojure
+2. Remember that while whitespace is preserved, it is automatically skipped during navigation.
+
+#### Familiar Functions for Updating Nodes with the Zip API
+
+The zip API provides familiar ways to work with parsed Clojure data structures.
+It offers some functions that correspond to the standard Clojure `seq` functions, for example:
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+(def zloc (z/of-string "[1\n2\n3]"))
+(z/vector? zloc)
+;; => true
+(z/sexpr zloc)
+;; => [1 2 3]
+(-> zloc (z/get 1) z/node pr)
+;; =stdout=>
+; <token: 2>
+(-> zloc (z/assoc 1 5) z/sexpr)
+;; => [1 5 3]
+(->> zloc (z/map #(z/edit % + 4)) z/root-string)
+;; => "[5\n6\n7]"
+
+(def zloc (z/of-string "{:a 10 :b 20}"))
+(z/map? zloc)
+;; => true
+(-> zloc (z/get :b) z/node pr)
+;; =stdout=>
+; <token: 20>
+(-> zloc (z/assoc :b 42) z/sexpr)
+;; => {:b 42, :a 10}
+(->> zloc (z/map-vals #(z/edit % inc)) z/root-string)
+;; => "{:a 11 :b 21}"
+(->> zloc
+     (z/map-keys #(z/edit %
+                          (fn [v] (keyword "prefix" (name v))) ))
+     z/root-string)
+;; => "{:prefix/a 10 :prefix/b 20}"
+```
+
+#### Sub Editing with the Zip API
+
+Sub editing allows you to effect changes to an isolated subtree (actually a sub zipper) while preserving your original location in the zipper
+
+When sub editing, your sub zipper is isolated to the current node and its children.
+The sub zipper acts like, and is, a full zipper; `rewrite-clj.zip/end?` will return `true` when you have navigated to the end of the sub zipper.
+
+This can be useful when you:
+
+* Are interested in restoring your location after digging down deep to make a change
+* Want to restrict your changes to a node and its children.
+It can be helpful to bound your movement when using functions that also affect current location such as `rewrite-clj.zip/remove`.
+
+```Clojure
+(require '[rewrite-clj.zip :as z])
+
+;; A sample to illustrate
+(def zloc (z/of-string "[a [b [c [d [e [f]]]]] g h]"))
+
+;; ... and a little helper that navigates our location to the end node:
+(defn to-end [zloc]
+  (->> zloc
+       (iterate z/next)
+       (drop-while (complement z/end?))
+       first))
+
+;; ... and a little editor to show which node was hit:
+(defn update-at-loc [zloc]
+  (z/edit zloc #(symbol "UPDATED" (str %))))
+
+;; If we don't use a sub zipper our end node is h:
+(-> zloc
+    to-end
+    update-at-loc
+    z/root-string)
+;; => "[a [b [c [d [e [f]]]]] g UPDATED/h]"
+
+;; If we subedit on the first node in the vector, we are restricted to that node.
+;; In our case that node is a:
+(-> zloc
+    z/down
+    (z/subedit->
+     to-end
+     update-at-loc)
+    z/root-string)
+;; => "[UPDATED/a [b [c [d [e [f]]]]] g h]"
+
+;; If we subedit on the second node in the vector, we are restricted to that node.
+;; In our case that node is [b [c [d [f]]]] with subedit end node f
+(-> zloc
+    z/down
+    z/right
+    (z/subedit->
+     to-end
+     update-at-loc)
+    z/root-string)
+;; => "[a [b [c [d [e [UPDATED/f]]]]] g h]"
+
+;; To show our original location was preserved,
+;; after a subedit of the last node within the 2nd node in the vector,
+;; a movement right brings us to node g
+(-> zloc
+    z/down
+    z/right
+    (z/subedit->
+     to-end
+     (z/edit #(symbol "UPDATED" (str %))))
+    z/right
+    z/string)
+;; => "g"
+```
+
+The zip API walk functions also isolate your work to the current node.
+Let’s explore:
+
+```Clojure
+(require '[rewrite-clj.zip :as z])
+
+;; Let's contrive an example with multiple top level forms:
+;; Let's contrive an example with multiple top level forms:
+(def s "(def x 1) (def y [2 3 [4 [5]]])")
+
+;; Now let's add 100 to all numbers:
+(-> (z/of-string s)
+    (z/postwalk (fn select [zloc] (number? (z/sexpr zloc)))
+                (fn visit [zloc] (z/edit zloc + 100)))
+    z/root-string)
+;; => "(def x 101) (def y [2 3 [4 [5]]])"
+
+;; Hmmm... what happened? Only the first number was affected.
+;; A new zipper created by of-string automaticaly navigates to the first non-whitespace/non-comment node.
+;; In our example, this is node (def x 1).
+;; Our walk was isolated to current node (def x 1) so that's all that got updated
+
+;; We can adapt to walk all nodes by instead using of-string* which does no auto navigation
+(-> (z/of-string* s)
+    (z/postwalk (fn select [zloc] (number? (z/sexpr zloc)))
+                (fn visit [zloc] (z/edit zloc + 100)))
+    z/root-string)
+;; => "(def x 101) (def y [102 103 [104 [105]]])"
+```
+
+#### Tracking Position with the Zip API
+
+If you need to track the source row and column while reading and updating your zipper, create your zipper with `:track-position? true` option.
+Note that the row and column are 1-based.
+
+<dl><dt><strong>💡 TIP</strong></dt><dd>
+
+If you have no interest in the zipper updating positions when the zipper changes, but are still interested in node positions, you can use a zipper without `:track-position? true` option.
+
+Read up on positional metadata under [rewrite-clj nodes](#nodes).
+</dd></dl>
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+;; parse some Clojure into a position tracking zipper
+(def zloc (z/of-string
+           "(defn sum-me\n  \"Add 'em up!\"\n  [a b c]\n  (+ a\n     c))"
+           {:track-position? true}))
+
+;; let's see what that looks like printed out
+(println (z/root-string zloc))
+;; =stdout=>
+; (defn sum-me
+;   "Add 'em up!"
+;   [a b c]
+;   (+ a
+;      c))
+
+;; navigate to second z in zipper
+(def zloc-c (-> zloc
+            (z/find-value z/next '+)
+            (z/find-value z/next 'c)))
+
+;; check if current node is as expected
+(z/string zloc-c)
+;; => "c"
+
+;; examine position of second z, it is on 6th column of the 5th row
+(z/position zloc-c)
+;; => [5 6]
+
+;; insert new element b with indentation and alignment
+(def zloc-c2 (-> zloc-c
+                 (z/insert-left 'b)        ;; insert b to the left of c
+                 (z/left)                  ;; move to b
+                 (z/insert-newline-right)  ;; insert a newline after b
+                 (z/right)                 ;; move to c
+                 (z/insert-space-left 4))) ;; c has 1 space before it, add 4 more to line it up
+
+;; we should still be at c
+(z/string zloc-c2)
+"c"
+
+;; output our updated Clojure
+(println (z/root-string zloc-c2))
+;; =stdout=>
+; (defn sum-me
+;   "Add 'em up!"
+;   [a b c]
+;   (+ a
+;      b
+;      c))
+
+;; and check that location of c has been updated, it should now be on the 6th column of the 6th row
+(z/position zloc-c2)
+;; => [6 6]
+```
+
+#### Zipper Options
+When creating a new zipper you may optionally include an options map.
+These options will be carried by the zipper and live for the life of the zipper.
+Current options are:
+
+* `:track-position?` - see [Tracking Position with the Zip API](#tracking-position-with-the-zip-api)
+* `:auto-resolve` - see [Custom Auto-Resolve Handling](#custom-auto-resolve-handling)
+
+After making changes via a zipper, the final step is typically to call `root-string` or `print-root`.
+
+Less frequently, one might call `root` which affects changes and returns the root rewrite-clj node.
+This node might be fed back into a new zipper.
+The options passed into the original zipper on creation will not be automatically applied to the new zipper and must be respecified:
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+;; some contrived options to demonstrate:
+(def zip-opts {:track-position? true
+               :auto-resolve (fn [_alias] 'custom-resolved)})
+
+(-> "(+ 10 20 30)"         ;; <- something more complicated would be here, of course
+    (z/of-string zip-opts) ;; <- our opts are passed in on creation
+    z/down z/right z/right
+    (z/edit inc)
+    z/root                 ;; <- applying changes and getting root node
+    (z/of-node zip-opts)   ;; <- pass the original zip-opts on creation of new zipper
+    z/down z/right z/right
+    (z/edit inc)
+    (z/root-string))
+;; => "(+ 10 22 30)"
+```
+
+### Parser API
+Parses Clojure/ClojureScript/EDN to rewrite-clj nodes.
+The [zip API](#zip-api) makes use of the parser API to parse Clojure into zippers.
+
+If your focus is parsing instead of rewriting, you might find this lower level API useful.
+Keep in mind that if you forgo the zip API, you forgo niceties such as the automatic handling of whitespace.
+
+You can choose to parse the first, or all forms from a string or, if using Clojure, a file.
+
+Here we parse a single form from a string:
+
+```clojure
+(require '[rewrite-clj.parser :as p])
+
+(def form-nodes (p/parse-string "(defn my-function [a]\n  (* a 3))"))
+```
+
+You’ll likely use the [node API](#node-api) on the returned nodes.
+
+See [parser API docs](https://cljdoc.org/d/rewrite-clj/rewrite-clj/CURRENT/api/rewrite-clj.parser).
+
+### Node API
+Inspect, analyze, create and render rewrite-clj nodes.
+
+```clojure
+(require '[rewrite-clj.parser :as p]
+         '[rewrite-clj.node :as n])
+
+(def nodes (p/parse-string "(defn my-function [a]\n  (* a 3))"))
+
+;; Explore what we've parsed
+(n/tag nodes)
+;; => :list
+
+(pr (n/children nodes))
+;; =stdout=>
+; (<token: defn> <whitespace: " "> <token: my-function> <whitespace: " "> <vector: [a]> <newline: "\n"> <whitespace: "  "> <list: (* a 3)>)
+
+(n/sexpr nodes)
+;; => (defn my-function [a] (* a 3))
+
+(n/child-sexprs nodes)
+;; => (defn my-function [a] (* a 3))
+
+;; convert the nodes back to a printable string
+(n/string nodes)
+;; => "(defn my-function [a]\n  (* a 3))"
+
+;; coerce clojure forms to rewrite-clj nodes
+(pr (n/coerce '[a b c]))
+;; =stdout=>
+; <vector: [a b c]>
+
+;; create rewrite-clj nodes by hand
+(pr (n/meta-node
+      (n/token-node :private)
+      (n/token-node 'sym)))
+;; =stdout=>
+; <meta: ^:private sym>
+```
+
+See [node API docs](https://cljdoc.org/d/rewrite-clj/rewrite-clj/CURRENT/api/rewrite-clj.node).
+
+#### Creating Nodes
+
+Rewrite-clj nodes can be created in a number of ways:
+
+1. Indirectly via the parser API:
+
+   ```Clojure
+   (-> (p/parse-string "[1 2 3]")
+       n/string)
+   ;; => "[1 2 3]"
+   ```
+2. Indirectly via the zip API (which uses the parser API):
+
+   ```Clojure
+   (-> (z/of-string "[1 2 3]")
+       z/node
+       n/string)
+   ;; => "[1 2 3]"
+   ```
+3. Via coercion from Clojure forms:
+
+   ```Clojure
+   (-> (n/coerce '[1 2 3])
+        n/string)
+   ;; => "[1 2 3]"
+   ```
+4. By explicitly calling node creation functions.
+
+   ```Clojure
+   (-> (n/vector-node [(n/token-node 1)
+                       (n/whitespace-node " ")
+                       (n/token-node 2)
+                       (n/whitespace-node " ")
+                       (n/token-node 3)])
+       n/string)
+   ;; => "[1 2 3]"
+   ```
+
+   The node creation function are what the parser API uses to create nodes.
+
+Which technique you use depends on our needs.
+
+Coercion is convenient, but doesn’t offer control over whitespace. In some cases coercion might not give you the result you expect:
+
+```Clojure
+(-> (n/coerce '#(+ %1 %2))
+    n/string)
+;; => "(fn* [p1__10532# p2__10533#] (+ p1__10532# p2__10533#))"
+```
+
+Be aware that node creation functions do not force you to use rewrite-clj nodes (notice the raw `1` `2` and `3`):
+
+```Clojure
+(-> (n/vector-node [1 (n/spaces 1) 2 (n/spaces 1) 3])
+    n/string)
+;; => "[1 2 3]"
+```
+
+...but no automatic coercion will be done on non rewrite-clj elements and their `tag` will return unknown.
+
+```Clojure
+(n/tag 1)
+;; :unknown
+```
+
+Finally, there are a handful of node whitespace creation convenience functions such as `spaces`, `newlines`, `line-separated` and `comma-separated`, see [the node API docs for details](https://cljdoc.org/d/rewrite-clj/rewrite-clj/CURRENT/api/rewrite-clj.node).
+
+### Paredit API
+Structured editing was introduce by rewrite-cljs and carried over to rewrite-clj v1.
+
+We might expand this section if there is interest, but the docstrings should get you started.
+
+See [current paredit API docs](https://cljdoc.org/d/rewrite-clj/rewrite-clj/CURRENT/api/rewrite-clj.paredit).
+
+## Map Nodes
+Rewrite-clj parses two types of maps.
+
+1. unqualified `{:a 1 :b 2}`
+2. namespaced `#:prefix {:x 1 :y 2}`
+
+Rewrite-clj models nodes as they appear in the original source.
+
+![map nodes](map-nodes.png)
+
+This is convenient when navigating through the source, but when we want to logically treat any map as a map the difference is admittedly bit awkward.
+
+## Parsing Peculiarities
+
+Rewrite-clj might suprise Windows users and can, in some specific cases, parse technically invalid Clojure.
+Some folks have come to rely on this over the years, so these are behaviours we will preserve.
+
+### Newlines Always Normalize to `\n`
+Window users might be suprised that `\r\n` newlines are converted to `\n` by rewrite-clj.
+
+Rewrite-clj makes use of [Clojure’s tools.reader](https://github.com/clojure/tools.reader) to parse Clojure code.
+The `tools.reader` normalizes all recognized newline variants to `\n`.
+Rewrite-clj picks up this behaviour.
+
+You can chime in and/or up-vote on this topic on [Ask Clojure](https://ask.clojure.org/index.php/12216/clojure-tools-reader-intent-regarding-newline-normalization).
+
+### Unbalanced Maps
+An unbalanced map is one where there is a key with no value.
+
+Rewrite-clj can parse and emit unbalanced maps:
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+(-> "{:a 1 :b 2 :c}"
+    z/of-string
+    z/root-string)
+;; => "{:a 1 :b 2 :c}"
+```
+
+An attempt to convert an unbalanced map to a Clojure form will throw:
+```clojure
+(try
+  (-> "{:a 1 :b 2 :c}"
+      z/of-string
+      z/sexpr)
+  (catch Throwable e
+    (.getMessage e)))
+;; => "No value supplied for key: :c"
+```
+
+**📌 NOTE**\
+`sexpr-able?` considers the current node element type only and will return `true` for all maps, balanced or not.
+
+### Maps with Duplicate keys
+Rewrite-clj can parse and emit maps with duplicate keys:
+
+```clojure
+(-> "{:a 1 :b 2 :a 3 :a 4 :a 5 :a 6}"
+    z/of-string
+    z/root-string)
+;; => "{:a 1 :b 2 :a 3 :a 4 :a 5 :a 6}"
+```
+
+But when converting to a Clojure form, duplicate keys are not valid in a map, so only the last key/value pair for duplicate keys will be included:
+```clojure
+(-> "{:a 1 :b 2 :a 3 :a 4 :a 5 :a 6}"
+    z/of-string
+    z/sexpr)
+;; => {:b 2, :a 6}
+```
+
+### Sets with Duplicate values
+
+Rewrite-clj can parse and emit sets with duplicate values:
+
+```clojure
+(-> "#{:a :b :a :a :a}"
+    z/of-string
+    z/root-string)
+;; => "#{:a :b :a :a :a}"
+```
+
+But when converting to a Clojure form, duplicate values in a set are not valid Clojure, so the duplicates are omitted:
+
+```clojure
+(-> "#{:a :b :a :a :a}"
+    z/of-string
+    z/sexpr)
+;; => #{:b :a}
+```
+
+### Invalid Metadata
+Clojure can read metadata that is any of:
+
+| Type | Example | Equivalent Long Form |
+| --- | --- | --- |
+| map | `^{:a 1 :b 2} foo` | `^{:a 1 :b 2} foo` |
+| keyword | `^:private bar` | `^{:private true} bar` |
+| symbol | `^SomeType baz` | `^{:tag SomeType} baz` |
+| string | `^"SomeType" qux` | `^{:tag "SomeType"} qux` |
+
+Rewrite-clj will happily read and write metdata that is technically invalid.
+When you `sexpr` a metadata node you are also effectively converting it to its long form.
+If you try to `sexpr` a node with invalid metadata you will get an exception:
+
+```clojure
+(try
+  (-> "^(bad metadata) foobar"
+      z/of-string
+      z/sexpr)
+  (catch Throwable e
+    (.getMessage e)))
+;; => "Metadata must be a map, keyword, symbol or string"
+```
+
+### Invalid Escaped Characters
+
+In Clojure, some escaped characters in strings are not valid.
+Rewrite-clj doesn’t much care, it will happily read and write strings with invalid escaped chars.
+If you `sexpr` a node with such a string, you will get an exception:
+
+```clojure
+(try
+  (-> "\"some string is wrong here \\x\""
+      z/of-string
+      z/sexpr)
+  (catch Throwable e
+    (.getMessage e)))
+;; => "Unsupported escape character: \\x."
+```
+
+## Sexpr Nuances
+
+Rewrite-clj parses arbitrary Clojure/ClojureScript source code into rewrite-clj nodes.
+Converting rewrite-clj nodes to Clojure forms via `sexpr` is convenient, but it does come with some caveats.
+
+Within reason, Clojure’s `read-string` and rewrite-clj’s `sexpr` functions should return equivalent Clojure forms.
+To illustrate, some code:
+
+```clojure
+(require '[rewrite-clj.zip :as z]
+         '[rewrite-clj.parser :as p]
+         '[rewrite-clj.node :as n]
+         #?(:cljs '[cljs.reader :refer [read-string]]))
+
+(defn form-test [s]
+  (let [forms [(-> s read-string)
+               (-> s z/of-string z/sexpr)
+               (-> s p/parse-string n/sexpr)]]
+    (if (apply = forms)
+      (first forms)
+      [:not-equal forms])))
+
+(form-test "a")
+;; => a
+(form-test "[1 2 3]")
+;; => [1 2 3]
+(form-test "(defn hello [name] (println \"Hello\" name))")
+;; => (defn hello [name] (println "Hello" name))
+```
+
+### Whitespace
+The whitespace that a rewrite-clj so carefully preserves is lost when converting to a Clojure form.
+
+```clojure
+(require '[rewrite-clj.parser :as p]
+         '[rewrite-clj.node :as n])
+
+;; parse some Clojure source
+(def nodes (p/parse-string "{  :a 1\n\n   :b 2}"))
+
+;; print it out to show the whitespace
+(println (n/string nodes))
+;; =stdout=>
+; {  :a 1
+;
+;    :b 2}
+
+;; print out Clojure forms and notice the loss of the specifics of whitespace and element ordering
+(pr (n/sexpr nodes))
+;; =stdout=>
+; {:b 2, :a 1}
+```
+
+### Not all Clojure Elements are Sexpr-able
+
+Some source code element types are not sexpr-able:
+
+* Reader ignore/discard `#_` (also known as "uneval" in rewrite-clj)
+* Comments
+* Clojure whitespace (which includes commas)
+
+Both the zip and node APIs include `sexpr-able?` to check if sexpr is supported for the current node element type.
+
+<dl><dt><strong>📌 NOTE</strong></dt><dd>
+
+`sexpr-able?` only looks at the current node element type. This means that `sexpr` will still throw when:
+
+1. called on a node with an element type that is `sepxr-able?` but, for whatever reason, has a child node that fails to `sexpr`, see [unbalanced maps](#unbalanced-maps), [invalid metadata](#invalid-metadata), and [invalid escaped characters](#invalid-escaped-characters).
+2. called directly on an [unbalanced maps](#unbalanced-maps) or node with [invalid metadata](#invalid-metadata) or node with [invalid escaped characters](#invalid-escaped-characters).
+</dd></dl>
+
+```clojure
+(require '[rewrite-clj.node :as n]
+         '[rewrite-clj.parser :as p]
+         '[rewrite-clj.zip :as z])
+
+#?(:clj (import clojure.lang.ExceptionInfo))
+
+;;
+;; Most nodes are sexpr-able
+;;
+
+;; we can check sexpr-ability through the node API
+(-> "hello" p/parse-string n/sexpr-able?)
+;; => true
+
+;; or through the zip API
+(-> "hello" z/of-string z/sexpr-able?)
+;; => true
+
+;;
+;; But some nodes are not sexpr-able
+;;
+
+;; the discard #_ node is not sexpr-able
+(-> "#_42" z/of-string z/sexpr-able?)
+;; => false
+
+;; and will throw if an attempt is made to sexpr
+(try
+  (-> "#_42" z/of-string z/sexpr)
+  (catch ExceptionInfo e
+    (ex-message e)))
+;; => "unsupported operation"
+
+;; comments nodes are not sexpr-able
+(-> ";; can’t sexpr me!" z/of-string z/next* z/sexpr-able?) ;; ①
+;; => false
+
+;; and will throw
+(try
+  (-> ";; can’t sexpr me!" z/of-string z/next* z/sexpr) ;; ①
+  (catch ExceptionInfo e
+    (ex-message e)))
+;; => "unsupported operation"
+
+;; and finally, Clojure whitespace nodes are not sexpr-able
+(-> " " z/of-string z/next* z/sexpr-able?) ;; ①
+;; => false
+
+;; and will throw
+(try
+  (-> " " z/of-string z/next* z/sexpr) ;; ①
+  (catch ExceptionInfo e
+    (ex-message e)))
+;; => "unsupported operation"
+```
+1. Notice the use of `next*` to include normally skipped nodes.
+
+Remember that child nodes with element types that are not `sexpr-able?` are skipped for `sexpr`:
+
+```clojure
+(-> (str "[1 #_:child-discard-will-be-skipped\n"
+         " ;; comment will be skipped\n"
+         " ,,, ,,, ,,, \n"
+         " 2]")
+    z/of-string
+    z/sexpr)
+;; => [1 2]
+```
+
+### Differences in Clojure Platforms
+
+Clojure and ClojureScript have differences.
+Some examples of what you might run into when using `sexpr` are:
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+;; ClojureScript has no Ratio type
+(-> (z/of-string "3/4") z/sexpr)
+;; =clj=> 3/4
+;; =cljs=> 0.75
+
+;; Integral type and behaviour is defined by host platforms
+(+ 10 (-> (z/of-string "9007199254740991") z/sexpr))
+;; =clj=> 9007199254741001
+;; =cljs=> 9007199254741000
+
+;; ClojureScript has no character type, characters are expressed as strings
+(-> (z/of-string "\\a") z/sexpr)
+;; =clj=> \a
+;; =cljs=> "a"
+```
+
+Note that these differences affect `sexpr` only.
+Rewrite-clj should be able to parse and rewrite all valid Clojure/ClojureScript code.
+
+### Reader Macro Chars
+
+Rewrite-clj can parse and write all reader macro chars.
+Be aware though, that it does have limitations when calling `sexpr` on rewrite-clj nodes representing some of these constructs.
+
+Let’s take a look, using [Clojure’s reader docs on macro characters](https://clojure.org/reference/reader#macrochars) as our reference.
+
+(headers are **description** followed by rewrite-clj parsed node `tag`)
+
+| Parsed input | Node sexpr 2+a |
+| --- | --- |
+| **Quote** `:quote` | ’form` |
+| `(quote form)` 2+a | **Character** `:token` |
+| `\newline` | `\newline` |
+| `\space` | `\space` |
+| `\tab` | `\tab` 2+a |
+| **Comment** `:comment` | `; comment` |
+| &lt;unsupported operation> 2+a | **Deref** `:deref` |
+| `@form` | `(clojure.core/deref form)` 2+a |
+| **Metadata** `:meta` | `^{:a 1 :b 2} [1 2 3]` |
+| `^{:b 2, :a 1} [1 2 3]` | `^String x` |
+| `^{String true} x` | `^:dynamic x` |
+| `^{:dynamic true} x` 2+a | **Set** `:set` |
+| `<mark>{1 2 3}` | `</mark>{1 3 2}` 2+a |
+| **Regex** `:regex` | `#"reg.*ex"` |
+| `(re-pattern "reg.**ex")` 2+a | *Var-quote** `:var` |
+| `#'x` | `(var x)` 2+a |
+| **Anonymous function** `:fn` | `#(println %)` |
+| `(fn* [p1__2976#] (println p1__2976#))` 2+a | **Ignore next form** `:uneval` |
+| `#_ :ignore-me` | &lt;unsupported operation> 2+a |
+| **Syntax quote** `:syntax-quote` | ``symbol` |
+| `(quote symbol)` 2+a | **Syntax unquote** `:unquote` |
+| `~symbol` | `(clojure.core/unquote symbol)` 2+a |
+| **Unquote splicing** `:unquote-spliciing` | `~@symbol` |
+| `(clojure.core/unquote-splicing symbol)` 2+a | **Tagged literal** `:reader-macro` |
+| `#foo/bar [1 2 3]` | `(read-string "#foo/bar [1 2 3]")` |
+| `#inst "2018-03-28T10:48:00.000"` | `(read-string "#inst \"2018-03-28T10:48:00.000\"")` |
+| `#uuid "3b8a31ed-fd89-4f1b-a00f-42e3d60cf5ce"` | `(read-string "#uuid \"3b8a31ed-fd89-4f1b-a00f-42e3d60cf5ce\"")` 2+a |
+| **Reader conditional** `:reader-macro` | `#?(:clj x :cljs y)` |
+| `(read-string "<mark>?(:clj x :cljs y)")` | `</mark>@?(:clj [x] :cljs [y])` |
+
+Observations:
+
+1. I think it was a design decision of rewrite-clj v0 to return `(read-string ...)` for reader macros it did not want to deal with (or deal with yet).
+Rewrite-clj v1 will carry on.
+   * It seems the idea might have been that the caller could eval the sexpr result if they wanted to?
+   * Note for ClojureScript users, `read-string` is not available under `cljs.core`, but a version is available under `cljs.tools.reader`.
+2. Tag metadata is returned as boolean metadata.
+A user could infer the intent through inspection though.
+
+### Namespaced Elements
+
+If the code you are parsing doesn’t use namespaced maps or you have no interest in using `sexpr` on the keys in those maps, the details in this section probably won’t be of concern to you.
+
+#### Recap
+In Clojure keywords and symbols can be qualified.
+A recap via examples:
+
+* Stand-alone keywords:
+
+  |  | keyword |
+  | --- | --- |
+  | unqualified | `:my-kw` |
+  | qualified | `:prefix/my-kw` |
+  | auto-resolved current namespace | `::my-kw` |
+  | auto-resolved namespaced alias | `::my-ns-alias/my-kw` |
+* Namespaced keyword and symbols:
+
+  |  | keyword | symbol |
+  | --- | --- | --- |
+  | unqualified (via `_` prefix) | `<mark>:prefix{:_/my-kw 1}` | ’</mark>:prefix{_/my-symbol}` |
+  | qualified | `<mark>:prefix{:my-kw 1}` | ’</mark>:prefix{my-symbol 1}` |
+  | auto-resolved current namespace | `<mark>::{:my-kw 1}` | ’</mark>::{my-symbol 1}` |
+  | auto-resolved namespaced alias | `<mark>::my-ns-alias{:my-kw 1}` | ’</mark>::my-ns-alias{my-symbol 1}` |
+
+#### Rewrite-clj Default Auto-Resolve Handling
+
+When calling `sexpr` on an auto-resolved keyword or symbol node, rewrite-clj will resolve:
+
+* the current namespace to `?\_current-ns_?`
+* namespaced alias `x` to `??\_x_??`
+
+To illustrate:
+```clojure
+(require '[rewrite-clj.parser :as p]
+         '[rewrite-clj.node :as n])
+
+(-> (p/parse-string "::kw") n/sexpr)
+;; => :?_current-ns_?/kw
+(-> (p/parse-string "#::{:a 1 :b 2 s1 3}") n/sexpr)
+;; => #:?_current-ns_?{s1 3, :b 2, :a 1}
+(-> (p/parse-string "::my-alias/kw") n/sexpr)
+;; => :??_my-alias_??/kw
+(-> (p/parse-string "#::my-alias{:a 1 :b 2 s1 3}") n/sexpr)
+;; => #:??_my-alias_??{s1 3, :b 2, :a 1}
+```
+
+Currently, symbols under syntax quote are never resolved.
+
+#### Custom Auto-Resolve Handling
+
+Rewrite-clj will not attempt to determine the current namespace and alias namespace mappings of the code it is parsing.
+It does, though, allow you to specify your own auto-resolve behavior.
+
+The `:auto-resolve` function takes a single arg `alias` for lookup and must return symbol.
+The `alias` will be:
+
+* `:current` for a request for the current namespace
+* otherwise it will be a symbol for the namespace alias to lookup
+
+For example, if you know namespace and alias info for the code rewrite-clj is operating on, you can specify it:
+
+```clojure
+(require '[rewrite-clj.parser :as p]
+         '[rewrite-clj.node :as n])
+
+(defn resolver [alias]
+  (or (get {:current 'my.current.ns
+            'my-alias 'my.aliased.ns} alias)
+      (symbol (str alias "-unresolved"))))
+
+(-> (p/parse-string "::kw") (n/sexpr {:auto-resolve resolver}))
+;; => :my.current.ns/kw
+(-> (p/parse-string "#::{:a 1 :b 2 s1 3}") (n/sexpr {:auto-resolve resolver}))
+;; => #:my.current.ns{s1 3, :b 2, :a 1}
+(-> (p/parse-string "::my-alias/kw") (n/sexpr {:auto-resolve resolver}))
+;; => :my.aliased.ns/kw
+(-> (p/parse-string "#::my-alias{:a 1 :b 2 s1 3}") (n/sexpr {:auto-resolve resolver}))
+;; => #:my.aliased.ns{s1 3, :b 2, :a 1}
+```
+
+The `:auto-resolve` option is accepted in the `opts` map arg for:
+
+* The `rewrite-clj.node` namespace functions `sexpr` and `child-sexpr`.
+* The `rewrite-clj.zip` namespace zipper creation functions `of-node*`, `of-node`, `of-string*`, `of-string`, `of-file*` and `of-file`.
+The resulting zipper will then automatically apply your `:auto-resolve` within any zip operation that makes use of sexpr, namely:
+  * `sexpr`
+  * `find-value` and `find-next-value` - sexpr is applied to each node to get the "value" for comparison
+  * `edit` - the current node is sexpr-ed
+  * `get` and `assoc` - sexpr is applied to the map key
+
+#### Impact of Auto-Resolve
+
+Let’s illustrate how functions that use `sexpr` internally are affected by exploring `rewrite-clj.zip/get`:
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+;; get on unqualified keys is straightforward:
+(-> "{:a 1 :b 2 c 3}" z/of-string (z/get :b) z/node pr)
+;; =stdout=>
+; <token: 2>
+
+;; get on qualified keys is also easy to grok
+(-> "{:a 1 :prefix/b 2 c 3}" z/of-string (z/get :prefix/b) z/node pr)
+;; =stdout=>
+; <token: 2>
+(-> "#:prefix{:a 1 :b 2 c 3}" z/of-string (z/get :prefix/b) z/node pr)
+;; =stdout=>
+; <token: 2>
+(-> "#:prefix{:a 1 :b 2 c 3}" z/of-string (z/get 'prefix/c) z/node pr)
+;; =stdout=>
+; <token: 3>
+
+;; but when we introduce auto-resolved elements, the default resolver comes into play
+;; and must be considered
+(-> "{::ns-alias/a 1 ::b 2 c 3}" z/of-string (z/get :?_current-ns_?/b) z/node pr)
+;; =stdout=>
+; <token: 2>
+(-> "{::ns-alias/a 1 ::b 2 c 3}" z/of-string (z/get :??_ns-alias_??/a) z/node pr)
+;; =stdout=>
+; <token: 1>
+(-> "#::{:a 1 :b 2 c 3}" z/of-string (z/get :?_current-ns_?/b) z/node pr)
+;; =stdout=>
+; <token: 2>
+(-> "#::{:a 1 :b 2 c 3}" z/of-string (z/get '?_current-ns_?/c) z/node pr)
+;; =stdout=>
+; <token: 3>
+```
+
+#### Impact of Namespaced Map Context on Keywords and Symbols
+
+Namespaced map context is automatically applied to symbols and keywords in namespaced maps.
+
+To illustrate with the zip API:
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+(def zloc (z/of-string "#:my-prefix {:a 1 :b 2 c 3}"))
+
+;; An sexpr on the namespaced map returns the expected Clojure form
+( -> zloc z/sexpr)
+;; => #:my-prefix{:b 2, c 3, :a 1}
+
+;; An sepxr on the an individual key in the namespaced map returns the expected Clojure form
+(-> zloc z/down z/rightmost z/down z/sexpr)
+;; => :my-prefix/a
+```
+
+Rewrite-clj applies the namespaced map context the namespaced map node children:
+
+* at create time (which is also parse time)
+* when the node’s children are replaced
+
+This works well with the mechanics of the zipper.
+Updates are automatically applied when moving `up` through the zipper:
+
+```clojure
+(require '[rewrite-clj.zip :as z])
+
+(def s "#:prefix {:a 1 :b 2 c 3}")
+
+;; sexpr works fine on unchanged zipper
+(-> s z/of-string z/sexpr)
+;; => #:prefix{:b 2, c 3, :a 1}
+
+;; changing the namespaced map prefix reapplies the context to the children
+(-> s
+    z/of-string
+    z/down
+    (z/replace (n/map-qualifier-node false "my-new-prefix"))
+    z/up
+    z/sexpr)
+;; => #:my-new-prefix{:b 2, c 3, :a 1}
+
+;; a new key/val gets the namespaced map context
+(-> s
+    z/of-string
+    z/down z/rightmost
+    (z/append-child :d)
+    (z/append-child 33)
+    z/up
+    z/sexpr)
+;; => #:prefix{:b 2, c 3, :d 33, :a 1}
+
+;; a replaced key gets namespaced map context
+(-> s
+    z/of-string
+    z/down z/rightmost z/down
+    (z/replace :a2)
+    z/up z/up
+    z/sexpr)
+;; => #:prefix{:a2 1, :b 2, c 3}
+
+;; but... be aware that the context is not applied...
+(-> s
+    z/of-string
+    z/down z/rightmost z/down
+    (z/replace :a2)
+    z/sexpr)
+;; => :a2
+
+;; ... until we move up to the namespaced map node:
+(-> s
+    z/of-string
+    z/down z/rightmost z/down
+    (z/replace :a2)
+    z/up z/up
+    z/down z/rightmost z/down
+    z/sexpr)
+;; => :prefix/a2
+```
+
+Some limitations:
+
+* Keyword and symbol nodes will continue to hold their namespaced map context even when moved outside a namespaced map.
+Should you need to, you can use the zip API’s `reapply-context` to manually apply context from the current node downward.
+* The context auto-update is a feature of the zip API, when working with [nodes directly](#node-api) the context will be applied at parse time, and when namespaced map node children are replaced only.
+
+## Dealing with Reader Generated Metadata
+Rewrite-clj offers, where it can, transparent coercion from Clojure forms to rewrite-clj nodes.
+
+Clojure will, in some cases, add location metadata that is not in the original source code, as illustrated here:
+
+**REPL session**
+
+```clojure
+(meta '(1 2 3))
+;; => {:line 1, :column 8}
+```
+
+Rewrite-clj will, on coercion from Clojure forms to rewrite-clj nodes, omit location metadata.
+No rewrite-clj metadata node will will be created if resulting metadata is empty.
+
+On conversion from rewrite-clj nodes to Clojure forms via `sexpr`, I don’t see a way to omit the location metadata.
+With the assumption that you will generally coerce Clojure forms back to rewrite-clj nodes, this should not cause an issue.
+
+To support those using rewrite-clj under sci, in addition to `:line` and `:column` rewrite-clj also removes `:end-line` and `:end-column` metadata.
+Note that while Clojure only adds location metadata to quoted lists, sci adds it to all forms that accept metadata.

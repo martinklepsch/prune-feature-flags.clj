@@ -1,23 +1,30 @@
 (ns feature-flags.core
-  (:require [rewrite-clj.zip :as z]
-            [clojure.java.io :as io]
-            [babashka.fs :as fs]))
+  (:require [rewrite-clj.zip :as z]))
+
+(declare transform-conditional)
 
 (defn- supported-conditional?
   [zloc]
   (contains? #{'when 'if 'when-not 'if-not} (z/sexpr (z/down zloc))))
 
+(defn- find-local-binding
+  "Given a symbol and a map of local bindings, return the bound value if it exists"
+  [sym locals]
+  (get locals sym))
+
 (defn- test-expression
   "Given an if, when, if-not or when-not expression, return the condition"
-  [zloc lookup]
-  (let [list-zloc (z/down zloc)]
-    (assert (contains? #{'when 'if 'when-not 'if-not} (z/sexpr list-zloc)))
-    (let [t (z/sexpr (z/right list-zloc))]
+  [zloc lookup locals]
+  (let [list-zloc (z/down zloc)
+        t (z/sexpr (z/right list-zloc))]
+    (if (symbol? t)
+      (or (find-local-binding t locals)
+          (get lookup t t))
       (get lookup t t))))
 
-(defn transform-conditional [zloc test-lookup]
+(defn transform-conditional [zloc test-lookup locals]
   (let [list-zloc (z/down zloc)]
-    (case [(z/sexpr list-zloc) (test-expression zloc test-lookup)]
+    (case [(z/sexpr list-zloc) (test-expression zloc test-lookup locals)]
       [when true] (z/replace zloc (-> list-zloc z/right z/right z/node))
       [when false] (z/remove zloc)
 
@@ -32,6 +39,16 @@
 
       ;; else
       zloc)))
+
+(defn- process-let-bindings
+  "Process let bindings sequentially, accumulating locals and transforming conditionals"
+  [zloc lookup]
+  (let [bindings-vec (-> zloc z/down z/right)
+        binding-pairs (partition 2 (z/sexpr bindings-vec))]
+    (reduce (fn [acc-locals [sym expr]]
+              (assoc acc-locals sym (get lookup expr expr)))
+            {}
+            binding-pairs)))
 
 (defn prune-conditionals
   "Given `code` as a string, remove if, when, if-not and when-not conditionals
@@ -53,6 +70,15 @@
   In this example the transformation code will behave as if all instances of
   '(flag-one?) have been replaced by `true`.
 
+  The code also supports feature flags bound to local variables in let bindings:
+
+     (let [new-name? (use-new-name?)
+           _ (if new-name? :a :b)]  ; This will also be transformed
+       (when new-name? :a))
+
+  When `{'(use-new-name?) true}` is provided in the test-lookup, both the conditional
+  in the binding and in the body will be transformed.
+
   LIMITATIONS:
   - it only works with `if`, `when` and their `-not` variants
   - extra forms like `and`, `not`, `or` etc. are not detected and therefore
@@ -66,15 +92,26 @@
    (prune-conditionals code {}))
   ([code test-lookup]
    (let [zip (z/of-string code)]
-     (loop [zloc zip]
+     (loop [zloc zip
+            locals {}]
        (if (z/end? zloc)
          (z/root zloc)
-         (let [zloc (z/next zloc)]
+         (let [zloc (z/next zloc)
+               locals (if (and (= :list (z/tag zloc))
+                               (= 'let (-> zloc z/down z/sexpr)))
+                        (merge locals (process-let-bindings zloc test-lookup))
+                        locals)]
            (if (and (= :list (z/tag zloc))
                     (supported-conditional? zloc))
-             (recur (transform-conditional zloc test-lookup))
-             (recur zloc))))))))
+             (recur (transform-conditional zloc test-lookup locals) locals)
+             (recur zloc locals))))))))
 
 (comment
   (prune-conditionals "(defn foo [] (if (some-test) :a :b)))"
+                      {'(some-test) true})
+  (prune-conditionals "(let [flag? (some-test)] (when flag? :a))"
+                      {'(some-test) true})
+  (prune-conditionals "(let [flag? (some-test)
+                            _ (if flag? :a :b)] 
+                        (when flag? :a))"
                       {'(some-test) true}))

@@ -1,5 +1,6 @@
 (ns feature-flags.core
-  (:require [rewrite-clj.zip :as z]))
+  (:require [rewrite-clj.zip :as z]
+            [rewrite-clj.node :as n]))
 
 (declare transform-conditional)
 
@@ -22,14 +23,51 @@
           (get lookup t t))
       (get lookup t t))))
 
+(defn- count-forms
+  "Count the number of forms after the test expression in a when/when-not form"
+  [zloc]
+  (loop [zloc (-> zloc z/down z/right z/right)
+         count 0]
+    (if (nil? zloc)
+      count
+      (recur (z/right zloc) (inc count)))))
+
+(defn- collect-when-forms
+  "Collect all forms after the test expression in a when/when-not form"
+  [zloc]
+  (loop [zloc (-> zloc z/down z/right z/right)
+         forms []]
+    (if (nil? zloc)
+      forms
+      (recur (z/right zloc) (conj forms (z/node zloc))))))
+
+(defn- make-do-node
+  "Create a new do node with the given forms"
+  [forms]
+  (let [do-node (z/of-node (list 'do))]
+    (reduce (fn [loc form]
+              (z/append-child loc form))
+            do-node
+            forms)))
+
 (defn transform-conditional [zloc test-lookup locals]
-  (let [list-zloc (z/down zloc)]
-    (case [(z/sexpr list-zloc) (test-expression zloc test-lookup locals)]
-      [when true] (z/replace zloc (-> list-zloc z/right z/right z/node))
+  (let [list-zloc (z/down zloc)
+        op (z/sexpr list-zloc)
+        test-result (test-expression zloc test-lookup locals)]
+    (case [op test-result]
+      [when true] (if (> (count-forms zloc) 1)
+                    (let [forms (collect-when-forms zloc)
+                          do-node (n/list-node (cons (n/token-node 'do) forms))]
+                      (z/replace zloc do-node))
+                    (z/replace zloc (-> list-zloc z/right z/right z/node)))
       [when false] (z/remove zloc)
 
       [when-not true] (z/remove zloc)
-      [when-not false] (z/replace zloc (-> list-zloc z/right z/right z/node))
+      [when-not false] (if (> (count-forms zloc) 1)
+                         (let [forms (collect-when-forms zloc)
+                               do-node (n/list-node (cons (n/token-node 'do) forms))]
+                           (z/replace zloc do-node))
+                         (z/replace zloc (-> list-zloc z/right z/right z/node)))
 
       [if true] (z/replace zloc (-> list-zloc z/right z/right z/node))
       [if false] (z/replace zloc (-> list-zloc z/right z/right z/right z/node))

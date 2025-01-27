@@ -40,3 +40,11 @@ In this example the transformation code will behave as if all instances of
 - `:refer-clojure :exclude [if when]` and similar configurations could lead to
   unwanted results"
 
+### Future Improvements
+
+1. Add an improved CLI API.
+  1. --dry-run option that only runs the transform and then shows a diff to the original code using `difftastic`
+
+2. Add support for `let` bindings, if forms specified in `test-lookup` are used in a let binding transform subsequent code accordingly, including the removal of the binding if possible
+
+3. Add support for logical statements like `and` and `or`. If the forms specified in `test-lookup` appear in those forms, transform the code accordingly.

@@ -1,50 +1,58 @@
-# prune-feature-flags.clj
+# feature-flags.clj
 
-This is a little babashka utility script to remove conditionals based on static mappings to their test forms. 
+A Babashka task to prune feature flag conditionals from your codebase. Removes dead code branches based on flag evaluations, keeping your code clean.
 
-- [This blogpost explains the basic idea in a bit more detail](https://martinklepsch.org/posts/homoiconicity-and-feature-flags.html).
-- Take a look at `prune-feature-flags.clj`, there are less than 100 lines of code and about 30 of them are docstrings.
-- Clone the repo and run `./prune-feature-flags.clj` to see how the file in the `example` directory is transformed. (Contributions to make the example more interesting very welcome!)
+![a demo of the pruning](/docs/demo.png)
 
-### From the `prune-conditionals` docstring:
+[This blogpost explains the basic idea in a bit more detail](https://martinklepsch.org/posts/homoiconicity-and-feature-flags.html).
 
-With no `test-lookup` supplied this will transform code in the following way:
+## Installation
 
-```clj
-(prune-conditionals "(if true :a :b)")
+In `bb.edn` add the following:
+
+```clojure
+{:deps {feature-flags {:git/url "https://github.com/martinklepsch/feature-flags.clj"
+                       :sha "38dffe4b32fc33765bafd7e9f8aba027ba454e98"}}
+ :tasks {prune feature-flags.task/prune}}
 ```
 
-the entire `if` form will get replaced by just `:a` since the else branch is
-effectively dead.
+## Usage
 
-When supplying a `test-lookup` map this becomes more useful with real world
-code, in particular for removing code has become dead due to feature flags
-being changed. Example:
-
-```clj
-(prune-conditionals "(if (flag-one?) :a :b)"
-                    {'(flag-one?) true})
+```sh
+bb prune --file example/acme/core.cljs \
+         --formatter cljfmt \
+         --test-lookup '{(use-new-name?) true}' \
+         --dry-run
 ```
 
-In this example the transformation code will behave as if all instances of
-'(flag-one?) have been replaced by `true`.
+It is recommended to remove feature flags one-by-one and verify results inbetween.
 
-### Limitations
+More examples
 
-- it only works with `if`, `when` and their `-not` variants
+```bash
+# Prune flags in a single file
+bb prune --file example/acme/core.cljs --test-lookup '{(use-new-name?) true}'
+
+# Process multiple files with a glob pattern
+bb prune --pattern "src/**/*.clj" --test-lookup '{(use-beta-features?) false}'
+
+# Dry-run to see changes without saving
+bb prune --file example.clj --test-lookup '{(use-new-layout?) true}' --dry-run
+```
+
+## Features
+
+- Removes `if`, `when`, `if-not`, and `when-not` branches for resolved flags
+- Supports local bindings in `let` forms
+- Integrates with `cljstyle`/`cljfmt` for formatting
+- Dry-run mode for safe previews
+
+## Current Limitations (WIP)
+
+- it will transform code like `(if true :a :b)` to `:a`
 - extra forms like `and`, `not`, `or` etc. are not detected and therefore
-  conditionals using them are left untouched
-  (unless one of you test-lookup forms has them)
+  conditionals using them are left untouched (unless one of you test-lookup forms has them)
 - inconsistent namespace aliases could make specifying the `test-lookup` map
   a bit more cumbersome
 - `:refer-clojure :exclude [if when]` and similar configurations could lead to
   unwanted results"
-
-### Future Improvements
-
-1. Add an improved CLI API.
-  1. --dry-run option that only runs the transform and then shows a diff to the original code using `difftastic`
-
-2. Add support for `let` bindings, if forms specified in `test-lookup` are used in a let binding transform subsequent code accordingly, including the removal of the binding if possible
-
-3. Add support for logical statements like `and` and `or`. If the forms specified in `test-lookup` appear in those forms, transform the code accordingly.

@@ -1,5 +1,6 @@
 (ns feature-flags.task
   (:require [babashka.cli :as cli]
+            [babashka.process :as p]
             [babashka.fs :as fs]
             [feature-flags.core :as ff]))
 
@@ -7,6 +8,9 @@
   [& args]
   (let [spec {:spec {:file {:desc "Single file to process"
                             :ref "<path>"}
+                     :formatter {:desc "Formatter to use (cljstyle or cljfmt)"
+                                 :validate #{"cljstyle" "cljfmt"}
+                                 :ref "<formatter>"}
                      :pattern {:desc "Glob pattern to find files"
                                :ref "<pattern>"}
                      :dry-run {:desc "Only print the transformed result"
@@ -19,6 +23,7 @@
       (let [files (if-let [pattern (:pattern opts)]
                     (fs/glob "." pattern)
                     [(:file opts)])
+            formatter (:formatter opts)
             mapping {'(use-new-name?) true
                      '(use-new-layout?) true
                      '(use-beta-features?) true}]
@@ -28,7 +33,13 @@
           (let [content (slurp file)
                 updated (-> content
                             (ff/prune-conditionals mapping)
-                            (ff/prune-conditionals mapping))]
+                            (ff/prune-conditionals mapping)
+                            (str))
+                formatted (:out (p/sh {:in updated}
+                                      (case formatter
+                                        "cljstyle" "cljstyle pipe"
+                                        "cljfmt" "cljfmt fix -"
+                                        "cat")))]
             (if (:dry-run opts)
-              (println (str updated))
-              (spit file updated))))))))
+              (println formatted)
+              (spit file formatted))))))))

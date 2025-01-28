@@ -1,6 +1,6 @@
 (ns feature-flags.core
-  (:require [rewrite-clj.zip :as z]
-            [rewrite-clj.node :as n]))
+  (:require [rewrite-clj.node :as n]
+            [rewrite-clj.zip :as z]))
 
 (declare transform-conditional)
 
@@ -44,20 +44,27 @@
 (defn- make-do-node
   "Create a new do node with the given forms"
   [forms]
-  (let [do-node (z/of-node (list 'do))]
-    (reduce (fn [loc form]
-              (z/append-child loc form))
-            do-node
-            forms)))
+  (n/list-node
+   (reduce (fn [nodes form]
+             (if (empty? nodes)
+               [(n/token-node 'do)
+                (n/newlines 1)
+                form]
+               (conj nodes
+                     (n/newlines 1)
+                     form)))
+           []
+           forms)))
 
-(defn transform-conditional [zloc test-lookup locals]
+(defn transform-conditional
+  [zloc test-lookup locals]
   (let [list-zloc (z/down zloc)
         op (z/sexpr list-zloc)
         test-result (test-expression zloc test-lookup locals)]
     (case [op test-result]
       [when true] (if (> (count-forms zloc) 1)
                     (let [forms (collect-when-forms zloc)
-                          do-node (n/list-node (cons (n/token-node 'do) forms))]
+                          do-node (make-do-node forms)]
                       (z/replace zloc do-node))
                     (z/replace zloc (-> list-zloc z/right z/right z/node)))
       [when false] (z/remove zloc)
@@ -65,7 +72,7 @@
       [when-not true] (z/remove zloc)
       [when-not false] (if (> (count-forms zloc) 1)
                          (let [forms (collect-when-forms zloc)
-                               do-node (n/list-node (cons (n/token-node 'do) forms))]
+                               do-node (make-do-node forms)]
                            (z/replace zloc do-node))
                          (z/replace zloc (-> list-zloc z/right z/right z/node)))
 
@@ -129,7 +136,9 @@
   ([code]
    (prune-conditionals code {}))
   ([code test-lookup]
-   (let [zip (z/of-string code)]
+   (let [zip (if (string? code)
+               (z/of-string code)
+               (z/of-node code))]
      (loop [zloc zip
             locals {}]
        (if (z/end? zloc)

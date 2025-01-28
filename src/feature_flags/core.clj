@@ -135,7 +135,7 @@
     unwanted results"
   ([code]
    (prune-conditionals code {}))
-  ([code test-lookup]
+  ([code {:keys [test-lookup]}]
    (let [zip (if (string? code)
                (z/of-string code)
                (z/of-node code))]
@@ -155,10 +155,10 @@
 
 (comment
   (prune-conditionals "(defn foo [] (if (some-test) :a :b)))"
-                      {'(some-test) true})
+                      {:test-lookup {'(some-test) true}})
   (prune-conditionals "(let [flag? (some-test)] (when flag? :a))"
-                      {'(some-test) true})
+                      {:test-lookup {'(some-test) true}})
   (prune-conditionals "(let [flag? (some-test)
                             _ (if flag? :a :b)] 
                         (when flag? :a))"
-                      {'(some-test) true}))
+                      {:test-lookup {'(some-test) true}}))

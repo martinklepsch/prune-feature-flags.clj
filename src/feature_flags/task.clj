@@ -32,8 +32,8 @@
             (println "Processing" (str file)))
           (let [content (slurp file)
                 updated (-> content
-                            (ff/prune-conditionals mapping)
-                            (ff/prune-conditionals mapping)
+                            (ff/prune-conditionals {:test-lookup mapping})
+                            (ff/prune-conditionals {:test-lookup mapping})
                             (str))
                 formatted (:out (p/sh {:in updated}
                                       (case formatter

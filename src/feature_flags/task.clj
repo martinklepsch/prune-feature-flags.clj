@@ -1,6 +1,8 @@
 (ns feature-flags.task
   (:require [babashka.cli :as cli]
             [babashka.process :as p]
+            [clojure.edn :as edn]
+            [clojure.string :as string]
             [babashka.fs :as fs]
             [feature-flags.core :as ff]))
 
@@ -11,6 +13,8 @@
                      :formatter {:desc "Formatter to use (cljstyle or cljfmt)"
                                  :validate #{"cljstyle" "cljfmt"}
                                  :ref "<formatter>"}
+                     :test-lookup {:desc "Test lookup map, e.g. `{(my-flag?) true}`"
+                                   :ref "<test-lookup>"}
                      :pattern {:desc "Glob pattern to find files"
                                :ref "<pattern>"}
                      :dry-run {:desc "Only print the transformed result"
@@ -24,22 +28,26 @@
                     (fs/glob "." pattern)
                     [(:file opts)])
             formatter (:formatter opts)
-            mapping {'(use-new-name?) true
-                     '(use-new-layout?) true
-                     '(use-beta-features?) true}]
-        (doseq [file files]
-          (binding [*out* *err*]
-            (println "Processing" (str file)))
-          (let [content (slurp file)
-                updated (-> content
-                            (ff/prune-conditionals {:test-lookup mapping})
-                            (ff/prune-conditionals {:test-lookup mapping})
-                            (str))
-                formatted (:out (p/sh {:in updated}
-                                      (case formatter
-                                        "cljstyle" "cljstyle pipe"
-                                        "cljfmt" "cljfmt fix -"
-                                        "cat")))]
-            (if (:dry-run opts)
-              (println formatted)
-              (spit file formatted))))))))
+            mapping (when-let [test-lookup (:test-lookup opts)]
+                      (edn/read-string test-lookup))]
+        (if-not mapping
+          (do
+            (println "Please provide a test-lookup map which sets literal values for your feature flag expressions\n\n")
+
+            (println (string/join " " args) "--test-lookup '{(my-flag?) true}'"))
+          (doseq [file files]
+            (binding [*out* *err*]
+              (println "Processing" (str file)))
+            (let [content (slurp file)
+                  updated (-> content
+                              (ff/prune-conditionals {:test-lookup mapping})
+                              (ff/prune-conditionals {:test-lookup mapping})
+                              (str))
+                  formatted (:out (p/sh {:in updated}
+                                        (case formatter
+                                          "cljstyle" "cljstyle pipe"
+                                          "cljfmt" "cljfmt fix -"
+                                          "cat")))]
+              (if (:dry-run opts)
+                (println formatted)
+                (spit file formatted)))))))))

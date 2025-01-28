@@ -23,9 +23,12 @@
                      '(use-new-layout?) true
                      '(use-beta-features?) true}]
         (doseq [file files]
-          (println "Processing" (str file))
+          (binding [*out* *err*]
+            (println "Processing" (str file)))
           (let [content (slurp file)
-                updated (ff/prune-conditionals content mapping)]
+                updated (-> content
+                            (ff/prune-conditionals mapping)
+                            (ff/prune-conditionals mapping))]
             (if (:dry-run opts)
-              (println updated)
+              (println (str updated))
               (spit file updated))))))))
